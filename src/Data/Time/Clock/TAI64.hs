@@ -231,8 +231,8 @@ toUTCTime lst = taiToUTCTime lst . toAbsoluteTime
 fromUTCTime :: LeapSecondTable -> UTCTime -> TAI64
 fromUTCTime lst = fromAbsoluteTime . utcToTAITime lst
 
--- | Render a textual (ie. hexadecimal) representation of the _external
--- TAI64{N,NA} format_ of the given 'TAI64Label'
+-- | Render a textual (ie. hexadecimal) representation of the /external
+-- TAI64{N,NA} format/ of the given 'TAI64Label'
 toText :: TAI64Label -> Text
 toText tl = TL.toStrict . TB.toLazyText $ case tl of
     TAI64S  tai -> TB.hexadecimal (taiSecs tai)
@@ -250,8 +250,8 @@ toText tl = TL.toStrict . TB.toLazyText $ case tl of
 fromText :: Text -> Either String TAI64
 fromText = PT.parseOnly parseText
 
--- | Render a textual (ie. hexadecimal) representation of the _external
--- TAI64{N,NA} format_ of the given 'TAI64Label'
+-- | Render a textual (ie. hexadecimal) representation of the /external
+-- TAI64{N,NA} format/ of the given 'TAI64Label'
 toByteString :: TAI64Label -> ByteString
 toByteString tl = BL.toStrict . BB.toLazyByteString $ case tl of
     TAI64S  tai -> BB.word64Hex (taiSecs tai)

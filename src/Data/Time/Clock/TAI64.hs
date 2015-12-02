@@ -9,7 +9,7 @@
 -- the <http://cr.yp.to/daemontools.html daemontools> suite) or \"svlogd\" (part
 -- of the <http://smarden.org/runit/ runit> suite). Note, however, that
 -- compatibility with the respective implementations has not been verified.
-module Data.Time.Clock.TAI.TAI64
+module Data.Time.Clock.TAI64
     ( TAI64
     , taiSecs, taiNanos, taiAttos
     , TAI64Label (..)

@@ -13,7 +13,7 @@ cabal-version:       >=1.10
 
 library
   exposed-modules:
-      Data.Time.Clock.TAI.TAI64
+      Data.Time.Clock.TAI64
 
   build-depends:
       attoparsec

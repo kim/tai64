@@ -241,10 +241,10 @@ toText tl = TL.toStrict . TB.toLazyText $ case tl of
         , TB.hexadecimal (taiNanos tai)
         ]
     TAI64NA tai -> mconcat
-      [ TB.hexadecimal (taiSecs  tai)
-      , TB.hexadecimal (taiNanos tai)
-      , TB.hexadecimal (taiAttos tai)
-      ]
+        [ TB.hexadecimal (taiSecs  tai)
+        , TB.hexadecimal (taiNanos tai)
+        , TB.hexadecimal (taiAttos tai)
+        ]
 
 -- | Parse a 'TAI64' label from it's textual (hexadecimal) representation.
 fromText :: Text -> Either String TAI64
@@ -260,10 +260,10 @@ toByteString tl = BL.toStrict . BB.toLazyByteString $ case tl of
         , BB.word32Hex (taiNanos tai)
         ]
     TAI64NA tai -> mconcat
-      [ BB.word64Hex (taiSecs  tai)
-      , BB.word32Hex (taiNanos tai)
-      , BB.word32Hex (taiAttos tai)
-      ]
+        [ BB.word64Hex (taiSecs  tai)
+        , BB.word32Hex (taiNanos tai)
+        , BB.word32Hex (taiAttos tai)
+        ]
 
 -- | Parse a 'TAI64' label from it's textual (hexadecimal) representation.
 fromByteString :: ByteString -> Either String TAI64

@@ -1,4 +1,4 @@
-.sw*
+*.sw*
 dist
 .stack-work
 tags*

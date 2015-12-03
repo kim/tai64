@@ -189,8 +189,11 @@ upp,piv :: Word64
 upp = 2^(63 :: Int)
 piv = 2^(62 :: Int)
 
--- | Convert a 'TAI64' label to 'AbsoluteTime'. Note that 'AbsoluteTime' has
--- only picosecond precision, so the conversion may be lossy.
+-- | Convert a 'TAI64' label to 'AbsoluteTime'.
+--
+-- Note that 'AbsoluteTime' has only picosecond precision, so the conversion may
+-- be lossy.
+--
 toAbsoluteTime :: TAI64 -> AbsoluteTime
 toAbsoluteTime (TAI64 secs nanos attos)
     | secs < upp = (secs' (secs - piv) + nanos' + attos')
@@ -206,6 +209,9 @@ toAbsoluteTime (TAI64 secs nanos attos)
     attos' = fromIntegral attos * 10^^(-18 :: Int)
 
 -- | Obtain a 'TAI64' label from 'AbsoluteTime'.
+--
+-- prop> toAbsoluteTime . fromAbsoluteTime = id
+--
 fromAbsoluteTime :: AbsoluteTime -> TAI64
 fromAbsoluteTime abst
     | abst < tai1970 = mk (tai1970 `diffAbsoluteTime` abst)
@@ -227,6 +233,8 @@ toUTCTime lst = taiToUTCTime lst . toAbsoluteTime
 -- | Obtain a 'TAI64' label from 'UTCTime'.
 --
 -- >>> fromUTCTime lst = fromAbsoluteTime . utcToTAITime lst
+--
+-- prop> toUTCTime lst . fromUTCTime lst = id
 --
 fromUTCTime :: LeapSecondTable -> UTCTime -> TAI64
 fromUTCTime lst = fromAbsoluteTime . utcToTAITime lst

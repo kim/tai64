@@ -10,9 +10,9 @@
 -- of the <http://smarden.org/runit/ runit> suite). Note, however, that
 -- compatibility with the respective implementations has not been verified.
 module Data.Time.Clock.TAI64
-    ( TAI64
-    , taiSecs, taiNanos, taiAttos
-    , TAI64Label (..)
+    ( TAI64 (..)
+    , Label (..)
+    , fromLabel
 
     , tai1970
 
@@ -39,20 +39,36 @@ import           Data.Attoparsec.Combinator       (option)
 import           Data.Attoparsec.Internal.Types   (Parser)
 import qualified Data.Attoparsec.Text             as PT
 import           Data.Binary
+import qualified Data.Binary                      as Binary
 import           Data.Bits
 import           Data.ByteString                  (ByteString)
-import qualified Data.ByteString.Builder          as BB
+import qualified Data.ByteString.Base16.Lazy      as Hex
 import qualified Data.ByteString.Lazy             as BL
 import           Data.Text                        (Text)
-import qualified Data.Text.Lazy                   as TL
-import qualified Data.Text.Lazy.Builder           as TB
-import qualified Data.Text.Lazy.Builder.Int       as TB
+import           Data.Text.Encoding               (decodeUtf8)
 import           Data.Time.Clock
 import           Data.Time.Clock.TAI
 import qualified Data.Vector.Generic              as VG
 import qualified Data.Vector.Generic.Mutable      as VM
 import           Data.Vector.Unboxed.Base
+import           Test.QuickCheck
 
+
+-- $setup
+-- >>> import System.IO
+-- >>> lst <- parseTAIUTCDATFile <$> readFile "tai-utc.dat"
+-- >>> :{
+--  instance Arbitrary DiffTime where
+--      arbitrary = secondsToDiffTime <$> arbitrary
+--  instance Arbitrary AbsoluteTime where
+--      arbitrary = (`addAbsoluteTime` taiEpoch) <$> arbitrary
+--  instance Arbitrary UTCTime where
+--      arbitrary = taiToUTCTime lst <$> arbitrary
+--  newtype PicosecondResolution = PicosecondResolution TAI64 deriving Show
+--  instance Arbitrary PicosecondResolution where
+--      arbitrary = PicosecondResolution <$>
+--          arbitrary `suchThat` ((==0) . (`mod` 1000000) . taiAttos)
+-- :}
 
 -- | Representation of a TAI64 label with full precision
 data TAI64 = TAI64
@@ -79,23 +95,65 @@ data TAI64 = TAI64
     -- ^ Attoseconds @[0 .. 999999999]@
     } deriving (Eq, Show, Ord)
 
+instance Arbitrary TAI64 where
+    arbitrary = TAI64
+        <$> arbitrary `suchThat` (<upp)
+        <*> arbitrary `suchThat` (<=999999999)
+        <*> arbitrary `suchThat` (<=999999999)
+
 -- | A TAI64 label with precision as denoted by the data constructor. This is
 -- used to render the \"external\" (cf. 'toText', 'toByteString') respectively
 -- binary representation.
-data TAI64Label
+data Label
     = TAI64S  {-# UNPACK #-} !TAI64
     | TAI64N  {-# UNPACK #-} !TAI64
     | TAI64NA {-# UNPACK #-} !TAI64
-    deriving (Eq, Show, Ord)
+    deriving Show
 
--- | External representation of a 'TAI64Label'
+-- | Get the 'TAI64' stamp from the 'Label', truncated to the precision as
+-- denoted by the 'Label''s data constructor.
+fromLabel :: Label -> TAI64
+fromLabel (TAI64S  t) = t { taiNanos = 0, taiAttos = 0 }
+fromLabel (TAI64N  t) = t { taiAttos = 0 }
+fromLabel (TAI64NA t) = t
+
+instance Eq Label where
+    a == b = case a of
+        TAI64S  (TAI64 s _ _ ) -> s == s'
+        TAI64N  (TAI64 s n _ ) -> s == s' && n == n'
+        TAI64NA (TAI64 s n as) -> s == s' && n == n' && as == as'
+      where
+        (TAI64 s' n' as') = fromLabel b
+
+instance Ord Label where
+    a <= b = case a of
+        TAI64S  (TAI64 s _ _ ) -> s <= s' && 0 <= n' &&  0 <= as'
+        TAI64N  (TAI64 s n _ ) -> s <= s' && n <= n' &&  0 <= as'
+        TAI64NA (TAI64 s n as) -> s <= s' && n <= n' && as <= as'
+      where
+        (TAI64 s' n' as') = fromLabel b
+
+instance Arbitrary Label where
+    arbitrary = oneof
+        [ TAI64S  <$> arbitrary
+        , TAI64N  <$> arbitrary
+        , TAI64NA <$> arbitrary
+        ]
+
+-- | External representation of a 'Label'
 --
 -- * 'TAI64S': eight 8-bit bytes, big-endian, encoding the second
 -- * 'TAI64N': twelve 8-bit bytes, big-endian, encoding the second, followed by
 -- the nanosecond
 -- * 'TAI64NA': sixteen 8-bit bytes, big-endian, encoding the second, followed
 -- by the nanosecond, followed by the attosecond
-instance Binary TAI64Label where
+--
+--
+-- Properties:
+--
+-- prop> (Binary.decode . Binary.encode) x == x
+--
+instance Binary Label where
     put (TAI64S  tai) = put (taiSecs tai)
     put (TAI64N  tai) = put (taiSecs tai, taiNanos tai)
     put (TAI64NA tai) = put (taiSecs tai, taiNanos tai, taiAttos tai)
@@ -181,7 +239,7 @@ instance VG.Vector Vector TAI64 where
 instance Unbox TAI64
 
 
--- | 1970-01-01 00:00:00 TAI (ie, 1970-01-01 00:00:10 UTC).
+-- | Beginning of 1970 TAI
 tai1970 :: AbsoluteTime
 tai1970 = addAbsoluteTime (secondsToDiffTime 3506716800) taiEpoch
 
@@ -194,84 +252,97 @@ piv = 2^(62 :: Int)
 -- Note that 'AbsoluteTime' has only picosecond precision, so the conversion may
 -- be lossy.
 --
+--
+-- Properties:
+--
+-- prop> \(PicosecondResolution x) -> (fromAbsoluteTime . toAbsoluteTime) x === x
+--
 toAbsoluteTime :: TAI64 -> AbsoluteTime
-toAbsoluteTime (TAI64 secs nanos attos)
-    | secs < upp = (secs' (secs - piv) + nanos' + attos')
-                      `addAbsoluteTime` tai1970
-    | secs < piv = (secs' (piv - secs) - nanos' - attos')
-                      `addAbsoluteTime` tai1970
-    | otherwise  = error "Outside universe lifetime"
+toAbsoluteTime (TAI64 s n as)
+    | s >= 0   && s < piv = before (secs (piv - s))
+    | s >= piv && s < upp = after  (secs (s - piv))
+    | otherwise = error "Outside universe lifetime"
   where
-    secs' :: Word64 -> DiffTime
-    secs' = secondsToDiffTime . fromIntegral
+    before = addAbsoluteTime attos
+           . addAbsoluteTime nanos
+           . (`addAbsoluteTime` tai1970)
+    after  = addAbsoluteTime (negate attos)
+           . addAbsoluteTime (negate nanos)
+           . before
+           . negate
 
-    nanos' = fromIntegral nanos * 10^^( -9 :: Int)
-    attos' = fromIntegral attos * 10^^(-18 :: Int)
+    secs :: Word64 -> DiffTime
+    secs = secondsToDiffTime . fromIntegral
+
+    nanos = picosecondsToDiffTime (fromIntegral  n *        1000)
+    attos = picosecondsToDiffTime (fromIntegral as `div` 1000000)
 
 -- | Obtain a 'TAI64' label from 'AbsoluteTime'.
 --
--- prop> toAbsoluteTime . fromAbsoluteTime = id
+--
+-- Properties:
+--
+-- prop> (toAbsoluteTime . fromAbsoluteTime) x === x
 --
 fromAbsoluteTime :: AbsoluteTime -> TAI64
-fromAbsoluteTime abst
-    | abst < tai1970 = mk (tai1970 `diffAbsoluteTime` abst)
-    | otherwise      = mk (abst `diffAbsoluteTime` tai1970)
+fromAbsoluteTime = mk . diffAbsoluteTime tai1970
   where
     mk d = let (s,f) = properFraction d
-               nanos = floor $ f * 10^( 9 :: Int)
-               attos = floor $ f * 10^(18 :: Int)
-            in TAI64 (s + piv) nanos attos
+               n     = nanos f
+               as    = attos f - (n * 10^(9 :: Int))
+            in TAI64 (piv + s) n as
+
+    nanos = truncate . (* 10^( 9 :: Int)) . abs
+    attos = truncate . (* 10^(18 :: Int)) . abs
 
 -- | Convert a 'TAI64' label to 'UTCTime'. Note that 'UTCTime' has only
 -- picosecond precision, so the conversion may be lossy.
 --
--- >>> toUTCTime lst = taiToUTCTime lst . toAbsoluteTime
+--
+-- Properties:
+--
+-- prop> toUTCTime lst x === (taiToUTCTime lst . toAbsoluteTime) x
+-- prop> \(PicosecondResolution x) -> (fromUTCTime lst . toUTCTime lst) x === x
 --
 toUTCTime :: LeapSecondTable -> TAI64 -> UTCTime
 toUTCTime lst = taiToUTCTime lst . toAbsoluteTime
 
 -- | Obtain a 'TAI64' label from 'UTCTime'.
 --
--- >>> fromUTCTime lst = fromAbsoluteTime . utcToTAITime lst
 --
--- prop> toUTCTime lst . fromUTCTime lst = id
+-- Properties:
+--
+-- prop> fromUTCTime lst x === (fromAbsoluteTime . utcToTAITime lst) x
+-- prop> (toUTCTime lst . fromUTCTime lst) x === x
 --
 fromUTCTime :: LeapSecondTable -> UTCTime -> TAI64
 fromUTCTime lst = fromAbsoluteTime . utcToTAITime lst
 
--- | Render a textual (ie. hexadecimal) representation of the /external
--- TAI64{N,NA} format/ of the given 'TAI64Label'
-toText :: TAI64Label -> Text
-toText tl = TL.toStrict . TB.toLazyText $ case tl of
-    TAI64S  tai -> TB.hexadecimal (taiSecs tai)
-    TAI64N  tai -> mconcat
-        [ TB.hexadecimal (taiSecs  tai)
-        , TB.hexadecimal (taiNanos tai)
-        ]
-    TAI64NA tai -> mconcat
-        [ TB.hexadecimal (taiSecs  tai)
-        , TB.hexadecimal (taiNanos tai)
-        , TB.hexadecimal (taiAttos tai)
-        ]
+-- | Render a textual (ie. hexadecimal) representation of the /external/
+-- TAI64{N,NA} format of the given 'Label'
+--
+--
+-- Properties:
+--
+-- prop> (fromText . toText) x === Right (fromLabel x)
+--
+toText :: Label -> Text
+toText = decodeUtf8 . toByteString
 
 -- | Parse a 'TAI64' label from it's textual (hexadecimal) representation.
 fromText :: Text -> Either String TAI64
 fromText = PT.parseOnly parseText
 
--- | Render a textual (ie. hexadecimal) representation of the /external
--- TAI64{N,NA} format/ of the given 'TAI64Label'
-toByteString :: TAI64Label -> ByteString
-toByteString tl = BL.toStrict . BB.toLazyByteString $ case tl of
-    TAI64S  tai -> BB.word64Hex (taiSecs tai)
-    TAI64N  tai -> mconcat
-        [ BB.word64Hex (taiSecs  tai)
-        , BB.word32Hex (taiNanos tai)
-        ]
-    TAI64NA tai -> mconcat
-        [ BB.word64Hex (taiSecs  tai)
-        , BB.word32Hex (taiNanos tai)
-        , BB.word32Hex (taiAttos tai)
-        ]
+-- | Render a textual (ie. hexadecimal) representation of the /external/
+-- TAI64{N,NA} format of the given 'Label'
+--
+--
+-- Properties:
+--
+-- prop> (fromByteString . toByteString) x === Right (fromLabel x)
+--
+toByteString :: Label -> ByteString
+toByteString = BL.toStrict . Hex.encode . Binary.encode
 
 -- | Parse a 'TAI64' label from it's textual (hexadecimal) representation.
 fromByteString :: ByteString -> Either String TAI64

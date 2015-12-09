@@ -10,7 +10,12 @@
 -- of the <http://smarden.org/runit/ runit> suite). Note, however, that
 -- compatibility with the respective implementations has not been verified.
 module Data.Time.Clock.TAI64
-    ( TAI64 (..)
+    ( TAI64
+    , tai64
+    , taiSecs
+    , taiNanos
+    , taiAttos
+
     , Label (..)
     , fromLabel
 
@@ -103,6 +108,13 @@ instance Arbitrary TAI64 where
         <$> choose (0, upp - 1)
         <*> choose (0, 999999999)
         <*> choose (0, 999999999)
+
+-- | Construct a 'TAI64' from seconds, nanoseconds and attoseconds
+tai64 :: Word64 -> Word32 -> Word32 -> TAI64
+tai64 s n as
+    = let (s',n')   = divMod n  1000000000
+          (n'',as') = divMod as 1000000000
+       in TAI64 (s + fromIntegral s') (n' + n'') as'
 
 -- | A TAI64 label with precision as denoted by the data constructor. This is
 -- used to render the \"external\" (cf. 'toText', 'toByteString') respectively

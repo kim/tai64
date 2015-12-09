@@ -66,8 +66,11 @@ import           Test.QuickCheck
 --      arbitrary = taiToUTCTime lst <$> arbitrary
 --  newtype PicosecondResolution = PicosecondResolution TAI64 deriving Show
 --  instance Arbitrary PicosecondResolution where
---      arbitrary = PicosecondResolution <$>
---          arbitrary `suchThat` ((==0) . (`mod` 1000000) . taiAttos)
+--      arbitrary = do
+--          t <- TAI64 <$> choose (0, upp -1)
+--                     <*> choose (0, 999999999)
+--                     <*> elements [0,1000000..999000000]
+--          pure $ PicosecondResolution t
 -- :}
 
 -- | Representation of a TAI64 label with full precision
@@ -97,9 +100,9 @@ data TAI64 = TAI64
 
 instance Arbitrary TAI64 where
     arbitrary = TAI64
-        <$> arbitrary `suchThat` (<upp)
-        <*> arbitrary `suchThat` (<=999999999)
-        <*> arbitrary `suchThat` (<=999999999)
+        <$> choose (0, upp - 1)
+        <*> choose (0, 999999999)
+        <*> choose (0, 999999999)
 
 -- | A TAI64 label with precision as denoted by the data constructor. This is
 -- used to render the \"external\" (cf. 'toText', 'toByteString') respectively

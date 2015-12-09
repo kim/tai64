@@ -268,7 +268,7 @@ toAbsoluteTime (TAI64 s n as)
            . (`addAbsoluteTime` tai1970)
     after  = addAbsoluteTime (negate attos)
            . addAbsoluteTime (negate nanos)
-           . before
+           . (`addAbsoluteTime` tai1970)
            . negate
 
     secs :: Word64 -> DiffTime

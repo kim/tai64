@@ -21,6 +21,9 @@ module Data.Time.Clock.TAI64
 
     , tai1970
 
+    , addTAI64
+    , diffTAI64
+
     , toAbsoluteTime
     , fromAbsoluteTime
     , toUTCTime
@@ -262,6 +265,27 @@ upp,piv :: Word64
 upp = 2^(63 :: Int)
 piv = 2^(62 :: Int)
 
+-- | addTAI64 a b = a + b
+--
+-- prop> \d (PicosecondResolution t) -> addTAI64 d t === fromAbsoluteTime (addAbsoluteTime d (toAbsoluteTime t))
+--
+addTAI64 :: DiffTime -> TAI64 -> TAI64
+addTAI64 d (TAI64 s n as) = TAI64 (s + s') (n + n') (as + as')
+  where
+    (s',f) = properFraction d
+    n'     = nanos f
+    as'    = attos f - (n' * (10^(9 :: Int)))
+
+    nanos = truncate . (* 10^( 9 :: Int)) . abs
+    attos = truncate . (* 10^(18 :: Int)) . abs
+
+-- | diffTAI64 a b = a - b
+--
+-- prop> \(PicosecondResolution a) (PicosecondResolution b) -> diffTAI64 a b === diffAbsoluteTime (toAbsoluteTime a) (toAbsoluteTime  b)
+--
+diffTAI64 :: TAI64 -> TAI64 -> DiffTime
+diffTAI64 a b = diffAbsoluteTime (toAbsoluteTime a) (toAbsoluteTime b)
+
 -- | Convert a 'TAI64' label to 'AbsoluteTime'.
 --
 -- Note that 'AbsoluteTime' has only picosecond precision, so the conversion may
@@ -274,17 +298,19 @@ piv = 2^(62 :: Int)
 --
 toAbsoluteTime :: TAI64 -> AbsoluteTime
 toAbsoluteTime (TAI64 s n as)
-    | s >= 0   && s < piv = before (secs (piv - s))
-    | s >= piv && s < upp = after  (secs (s - piv))
+    | s >= 0   && s < piv = before1970 (secs (piv - s))
+    | s >= piv && s < upp = after1970  (secs (s - piv))
     | otherwise = error "Outside universe lifetime"
   where
-    before = addAbsoluteTime attos
-           . addAbsoluteTime nanos
-           . (`addAbsoluteTime` tai1970)
-    after  = addAbsoluteTime (negate attos)
-           . addAbsoluteTime (negate nanos)
-           . (`addAbsoluteTime` tai1970)
-           . negate
+    before1970
+        = addAbsoluteTime (negate attos)
+        . addAbsoluteTime (negate nanos)
+        . (`addAbsoluteTime` tai1970)
+        . negate
+    after1970
+        = addAbsoluteTime attos
+        . addAbsoluteTime nanos
+        . (`addAbsoluteTime` tai1970)
 
     secs :: Word64 -> DiffTime
     secs = secondsToDiffTime . fromIntegral
@@ -305,7 +331,7 @@ fromAbsoluteTime = mk . diffAbsoluteTime tai1970
     mk d = let (s,f) = properFraction d
                n     = nanos f
                as    = attos f - (n * 10^(9 :: Int))
-            in TAI64 (piv + s) n as
+            in TAI64 (piv - s) n as
 
     nanos = truncate . (* 10^( 9 :: Int)) . abs
     attos = truncate . (* 10^(18 :: Int)) . abs

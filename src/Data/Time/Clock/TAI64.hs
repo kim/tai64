@@ -129,8 +129,11 @@ instance Arbitrary TAI64 where
 -- | Construct a 'TAI64' from seconds, nanoseconds and attoseconds
 tai64 :: Word64 -> Word32 -> Word32 -> TAI64
 tai64 s n as
-    | n  > 999999999 = tai64 (s + 1) (n - 999999999) as
-    | as > 999999999 = tai64 s       (n + 1)         (as - 999999999)
+    | n  > 999999999 = if s >= maxBound - 1 then
+                           maxBound
+                       else
+                           tai64 (s + 1) (n - 999999999) as
+    | as > 999999999 = tai64 s (n + 1) (as - 999999999)
     | otherwise      = let (s', n' ) = divMod n  1000000000
                            (n'',as') = divMod as 1000000000
                            secs      = s + fromIntegral s'

@@ -24,10 +24,15 @@ module Data.Time.Clock.TAI64
     , addTAI64
     , diffTAI64
 
+    , sumTAI64
+    , subTAI64
+
     , toAbsoluteTime
     , fromAbsoluteTime
     , toUTCTime
     , fromUTCTime
+    , toPOSIXTime
+    , fromPOSIXTime
 
     , toText
     , fromText
@@ -55,6 +60,7 @@ import qualified Data.ByteString.Lazy             as BL
 import           Data.Text                        (Text)
 import           Data.Text.Encoding               (decodeUtf8)
 import           Data.Time.Clock
+import           Data.Time.Clock.POSIX
 import           Data.Time.Clock.TAI
 import qualified Data.Vector.Generic              as VG
 import qualified Data.Vector.Generic.Mutable      as VM
@@ -63,11 +69,14 @@ import           Test.QuickCheck
 
 
 -- $setup
+-- >>> :set -XScopedTypeVariables
 -- >>> import System.IO
 -- >>> lst <- parseTAIUTCDATFile <$> readFile "tai-utc.dat"
 -- >>> :{
 --  instance Arbitrary DiffTime where
 --      arbitrary = secondsToDiffTime <$> arbitrary
+--  instance Arbitrary NominalDiffTime where
+--      arbitrary = realToFrac <$> arbitrary
 --  instance Arbitrary AbsoluteTime where
 --      arbitrary = (`addAbsoluteTime` taiEpoch) <$> arbitrary
 --  instance Arbitrary UTCTime where
@@ -106,18 +115,28 @@ data TAI64 = TAI64
     -- ^ Attoseconds @[0 .. 999999999]@
     } deriving (Eq, Show, Ord)
 
+instance Bounded TAI64 where
+    minBound = TAI64 0 0 0
+    maxBound = TAI64 maxBound 999999999 999999999
+
 instance Arbitrary TAI64 where
     arbitrary = TAI64
         <$> choose (0, upp - 1)
         <*> choose (0, 999999999)
         <*> choose (0, 999999999)
 
+
 -- | Construct a 'TAI64' from seconds, nanoseconds and attoseconds
 tai64 :: Word64 -> Word32 -> Word32 -> TAI64
 tai64 s n as
-    = let (s',n')   = divMod n  1000000000
-          (n'',as') = divMod as 1000000000
-       in TAI64 (s + fromIntegral s') (n' + n'') as'
+    | n  > 999999999 = tai64 (s + 1) (n - 999999999) as
+    | as > 999999999 = tai64 s       (n + 1)         (as - 999999999)
+    | otherwise      = let (s', n' ) = divMod n  1000000000
+                           (n'',as') = divMod as 1000000000
+                           secs      = s + fromIntegral s'
+                        in TAI64 (if secs < s then maxBound else secs)
+                                 (n' + n'')
+                                 as'
 
 -- | A TAI64 label with precision as denoted by the data constructor. This is
 -- used to render the \"external\" (cf. 'toText', 'toByteString') respectively
@@ -270,14 +289,7 @@ piv = 2^(62 :: Int)
 -- prop> \d (PicosecondResolution t) -> addTAI64 d t === fromAbsoluteTime (addAbsoluteTime d (toAbsoluteTime t))
 --
 addTAI64 :: DiffTime -> TAI64 -> TAI64
-addTAI64 d (TAI64 s n as) = TAI64 (s + s') (n + n') (as + as')
-  where
-    (s',f) = properFraction d
-    n'     = nanos f
-    as'    = attos f - (n' * (10^(9 :: Int)))
-
-    nanos = truncate . (* 10^( 9 :: Int)) . abs
-    attos = truncate . (* 10^(18 :: Int)) . abs
+addTAI64 d = sumTAI64 (fromDiffTime d)
 
 -- | diffTAI64 a b = a - b
 --
@@ -286,10 +298,25 @@ addTAI64 d (TAI64 s n as) = TAI64 (s + s') (n + n') (as + as')
 diffTAI64 :: TAI64 -> TAI64 -> DiffTime
 diffTAI64 a b = diffAbsoluteTime (toAbsoluteTime a) (toAbsoluteTime b)
 
+-- | sumTAI64 a b = a + b
+--
+sumTAI64 :: TAI64 -> TAI64 -> TAI64
+sumTAI64 a b = tai64 (taiSecs  a + taiSecs  b)
+                     (taiNanos a + taiNanos b)
+                     (taiAttos a + taiAttos b)
+
+-- | subTAI64 a b = a - b
+--
+subTAI64 :: TAI64 -> TAI64 -> TAI64
+subTAI64 a b | b >= a    = minBound
+             | otherwise = tai64 (taiSecs  a - taiSecs  b)
+                                 (taiNanos a - taiNanos b)
+                                 (taiAttos a - taiAttos b)
+
 -- | Convert a 'TAI64' label to 'AbsoluteTime'.
 --
--- Note that 'AbsoluteTime' has only picosecond precision, so the conversion may
--- be lossy.
+-- Note that 'AbsoluteTime' has only picosecond precision, so the conversion is
+-- lossy.
 --
 --
 -- Properties:
@@ -328,16 +355,23 @@ toAbsoluteTime (TAI64 s n as)
 fromAbsoluteTime :: AbsoluteTime -> TAI64
 fromAbsoluteTime = mk . diffAbsoluteTime tai1970
   where
-    mk d = let (s,f) = properFraction d
-               n     = nanos f
-               as    = attos f - (n * 10^(9 :: Int))
-            in TAI64 (piv - s) n as
+    mk d = let (TAI64 s n as) = fromDiffTime d in TAI64 (piv - s) n as
+
+fromDiffTime :: DiffTime -> TAI64
+fromDiffTime d = TAI64 s n as
+  where
+    (s,f) = properFraction d
+    n     = nanos f
+    as    = attos f - (n * 10^(9 :: Int))
 
     nanos = truncate . (* 10^( 9 :: Int)) . abs
     attos = truncate . (* 10^(18 :: Int)) . abs
+{-# INLINABLE fromDiffTime #-}
 
--- | Convert a 'TAI64' label to 'UTCTime'. Note that 'UTCTime' has only
--- picosecond precision, so the conversion may be lossy.
+-- | Convert a 'TAI64' label to 'UTCTime'.
+--
+-- Note that 'UTCTime' has only picosecond precision, so the conversion is
+-- lossy.
 --
 --
 -- Properties:
@@ -358,6 +392,29 @@ toUTCTime lst = taiToUTCTime lst . toAbsoluteTime
 --
 fromUTCTime :: LeapSecondTable -> UTCTime -> TAI64
 fromUTCTime lst = fromAbsoluteTime . utcToTAITime lst
+
+-- | Convert a 'TAI64' label to 'POSIXTime'.
+--
+-- Note that 'POSXITime' has only picosecond precision, so the conversion is
+-- lossy.
+--
+--
+-- Properties:
+--
+-- prop> \(PicosecondResolution x) -> (fromPOSIXTime . toPOSIXTime) x === x
+--
+toPOSIXTime :: TAI64 -> POSIXTime
+toPOSIXTime = realToFrac . flip diffTAI64 (fromAbsoluteTime tai1970)
+
+-- | Obtain a 'TAI64' label from 'POSIXTime'
+--
+--
+-- Properties:
+--
+-- prop> fromPOSIXTime x === fromUTCTime lst (posixSecondsToUTCTime x)
+--
+fromPOSIXTime :: POSIXTime -> TAI64
+fromPOSIXTime = flip addTAI64 (fromAbsoluteTime tai1970) . realToFrac
 
 -- | Render a textual (ie. hexadecimal) representation of the /external/
 -- TAI64{N,NA} format of the given 'Label'

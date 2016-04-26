@@ -2,7 +2,7 @@ name:                tai64
 version:             0.1.0.2
 synopsis:            Tai64 Labels for Haskell
 homepage:            https://github.com/kim/tai64
-license:             MIT
+license:             MPL
 license-file:        LICENSE
 author:              Kim Altintop
 maintainer:          kim.altintop@gmail.com

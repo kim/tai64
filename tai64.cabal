@@ -1,5 +1,5 @@
 name:                tai64
-version:             0.1.0.1
+version:             0.1.0.2
 synopsis:            Tai64 Labels for Haskell
 homepage:            https://github.com/kim/tai64
 license:             MPL

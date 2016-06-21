@@ -1,6 +1,7 @@
-{-# LANGUAGE CPP                   #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE TypeFamilies          #-}
+{-# LANGUAGE CPP                        #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses      #-}
+{-# LANGUAGE TypeFamilies               #-}
 
 {-# OPTIONS_HADDOCK show-extensions #-}
 
@@ -29,19 +30,35 @@ module Data.Time.Clock.TAI64
     , taiNanos
     , taiAttos
 
-    , Label (..)
-    , fromLabel
-
     , addTAI64
     , diffTAI64
-
     , sumTAI64
     , subTAI64
 
-    , toUTCTime
-    , fromUTCTime
-    , toPOSIXTime
-    , fromPOSIXTime
+    , toAbsoluteTime
+    , fromAbsoluteTime
+
+    -- * @libtai@ compatibility
+    -- $libtai
+    , Libtai
+    , libtai
+    , unLibtai
+
+    , taia_now
+    , tai64nlocal
+
+    , libtaiToUTC
+    , libtaiToPOSIX
+    , libtaiLabel
+
+    , sumLibtai
+    , subLibtai
+    , addLibtai
+    , diffLibtai
+
+    -- * External representation
+    , Label (..)
+    , fromLabel
 
     , toText
     , fromText
@@ -70,13 +87,13 @@ import qualified Data.ByteString.Base16.Lazy      as Hex
 import qualified Data.ByteString.Lazy             as BL
 import           Data.Text                        (Text)
 import           Data.Text.Encoding               (decodeUtf8)
-import           Data.Time.Clock
+import           Data.Time
 import           Data.Time.Clock.POSIX
+import           Data.Time.Clock.TAI
 import qualified Data.Vector.Generic              as VG
 import qualified Data.Vector.Generic.Mutable      as VM
 import           Data.Vector.Unboxed.Base
 import           Test.QuickCheck
-
 
 -- $setup
 -- >>> :set -XScopedTypeVariables
@@ -155,77 +172,6 @@ tai64 s n as
                                  (n' + n'')
                                  as'
 
--- | A TAI64 label with precision as denoted by the data constructor. This is
--- used to render the \"external\" (cf. 'toText', 'toByteString') respectively
--- binary representation.
---
-data Label
-    = TAI64S  {-# UNPACK #-} !TAI64
-    | TAI64N  {-# UNPACK #-} !TAI64
-    | TAI64NA {-# UNPACK #-} !TAI64
-    deriving Show
-
--- | Get the 'TAI64' stamp from the 'Label', truncated to the precision as
--- denoted by the 'Label''s data constructor.
---
-fromLabel :: Label -> TAI64
-fromLabel (TAI64S  t) = t { taiNanos = 0, taiAttos = 0 }
-fromLabel (TAI64N  t) = t { taiAttos = 0 }
-fromLabel (TAI64NA t) = t
-
-instance Eq Label where
-    a == b = case a of
-        TAI64S  (TAI64 s _ _ ) -> s == s'
-        TAI64N  (TAI64 s n _ ) -> s == s' && n == n'
-        TAI64NA (TAI64 s n as) -> s == s' && n == n' && as == as'
-      where
-        (TAI64 s' n' as') = fromLabel b
-
-instance Ord Label where
-    a <= b = case a of
-        TAI64S  (TAI64 s _ _ ) -> s <= s' && 0 <= n' &&  0 <= as'
-        TAI64N  (TAI64 s n _ ) -> s <= s' && n <= n' &&  0 <= as'
-        TAI64NA (TAI64 s n as) -> s <= s' && n <= n' && as <= as'
-      where
-        (TAI64 s' n' as') = fromLabel b
-
-instance Arbitrary Label where
-    arbitrary = oneof
-        [ TAI64S  <$> arbitrary
-        , TAI64N  <$> arbitrary
-        , TAI64NA <$> arbitrary
-        ]
-
--- | External representation of a 'Label'
---
--- * 'TAI64S': eight 8-bit bytes, big-endian, encoding the second
--- * 'TAI64N': twelve 8-bit bytes, big-endian, encoding the second, followed by
--- the nanosecond
--- * 'TAI64NA': sixteen 8-bit bytes, big-endian, encoding the second, followed
--- by the nanosecond, followed by the attosecond
---
---
--- Properties:
---
--- prop> (Binary.decode . Binary.encode) x == x
---
-instance Binary Label where
-    put (TAI64S  tai) = putWord64be (taiSecs tai)
-    put (TAI64N  tai) = putWord64be (taiSecs tai) *> putWord32be (taiNanos tai)
-    put (TAI64NA tai) = putWord64be (taiSecs tai) *> putWord32be (taiNanos tai)
-                                                  *> putWord32be (taiAttos tai)
-
-    get = do
-        elts <- (,,) <$> getWord64be
-                     <*> optional getWord32be
-                     <*> optional getWord32be
-        pure $ case elts of
-            (s, Just  n, Just  a) -> TAI64NA (TAI64 s n a)
-            (s, Just  n, Nothing) -> TAI64N  (TAI64 s n 0)
-            (s, Nothing, Nothing) -> TAI64S  (TAI64 s 0 0)
-            (s, Nothing, Just  n) -> TAI64N  (TAI64 s n 0)
-
-
 newtype instance MVector s TAI64 = MV_TAI64 (MVector s (Word64,Word32,Word32))
 newtype instance Vector    TAI64 = V_TAI64  (Vector    (Word64,Word32,Word32))
 
@@ -297,13 +243,12 @@ instance VG.Vector Vector TAI64 where
 
 instance Unbox TAI64
 
-
 -- | addTAI64 a b = a + b
 --
 --
 -- Properties:
 --
--- prop> \d (PicosecondResolution t) -> addTAI64 d t === fromUTCTime (addUTCTime (realToFrac d) (toUTCTime t))
+-- prop> \d (PicosecondResolution t) -> addTAI64 d t === fromAbsoluteTime (addAbsoluteTime d (toAbsoluteTime t))
 --
 addTAI64 :: DiffTime -> TAI64 -> TAI64
 addTAI64 d = sumTAI64 (fromDiffTime d)
@@ -313,10 +258,11 @@ addTAI64 d = sumTAI64 (fromDiffTime d)
 --
 -- Properties:
 --
--- prop> \(PicosecondResolution a) (PicosecondResolution b) -> b <= a ==> diffTAI64 a b === realToFrac (diffUTCTime (toUTCTime a) (toUTCTime b))
+-- prop> \(PicosecondResolution a) (PicosecondResolution b) -> b <= a && toAbsoluteTime b >= taiEpoch ==> diffTAI64 a b === diffAbsoluteTime (toAbsoluteTime a) (toAbsoluteTime b)
 --
 diffTAI64 :: TAI64 -> TAI64 -> DiffTime
 diffTAI64 a = toDiffTime . subTAI64 a
+-- FIXME: why are 'AbsoluteTime's before 'taiEpoch' subject to rounding errors?
 
 -- | sumTAI64 a b = a + b
 --
@@ -364,51 +310,300 @@ subTAI64 a b =
                              else (secs, nanos')
      in TAI64 secs' nanos'' attos'
 
--- | Convert a 'TAI64' label to 'UTCTime'.
+-- | Convert a 'TAI64' label to 'AbsoluteTime'.
 --
--- Note that 'UTCTime' has only picosecond precision, so the conversion is
--- lossy.
---
+-- Note that 'AbsoluteTime' has only picosecond resolution, hence the conversion
+-- is lossy.
 --
 -- Properties:
 --
--- prop> \(PicosecondResolution x) -> (fromUTCTime . toUTCTime) x === x
+-- prop> \(PicosecondResolution x) -> (fromAbsoluteTime . toAbsoluteTime) x === x
 --
-toUTCTime :: TAI64 -> UTCTime
-toUTCTime = posixSecondsToUTCTime . toPOSIXTime
+toAbsoluteTime :: TAI64 -> AbsoluteTime
+toAbsoluteTime (TAI64 s n as)
+    | s >= 0   && s < piv = before1970 (secs (piv - s))
+    | s >= piv && s < upp = after1970  (secs (s - piv))
+    | otherwise = error "Outside universe lifetime"
+  where
+    before1970
+        = addAbsoluteTime (negate attos)
+        . addAbsoluteTime (negate nanos)
+        . (`addAbsoluteTime` tai64Epoch)
+        . negate
+    after1970
+        = addAbsoluteTime attos
+        . addAbsoluteTime nanos
+        . (`addAbsoluteTime` tai64Epoch)
 
--- | Obtain a 'TAI64' label from 'UTCTime'.
---
---
--- Properties:
---
--- prop> (toUTCTime . fromUTCTime) x === x
---
-fromUTCTime :: UTCTime -> TAI64
-fromUTCTime = fromPOSIXTime . utcTimeToPOSIXSeconds
+    secs :: Word64 -> DiffTime
+    secs = secondsToDiffTime . fromIntegral
 
--- | Convert a 'TAI64' label to 'POSIXTime'.
---
--- Note that 'POSIXTime' has only picosecond precision, so the conversion is
--- lossy.
---
---
--- Properties:
---
--- prop> \(PicosecondResolution x) -> (fromPOSIXTime . toPOSIXTime) x === x
---
-toPOSIXTime :: TAI64 -> POSIXTime
-toPOSIXTime = subtract (2^(62 :: Int)) . subtract 10 . realToFrac . toDiffTime
+    nanos = picosecondsToDiffTime (fromIntegral  n *        1000)
+    attos = picosecondsToDiffTime (fromIntegral as `div` 1000000)
 
--- | Obtain a 'TAI64' label from 'POSIXTime'
+-- | Obtain a 'TAI64' label from 'AbsoluteTime'.
 --
 --
 -- Properties:
 --
--- prop> fromPOSIXTime x === fromUTCTime (posixSecondsToUTCTime x)
+-- prop> (toAbsoluteTime . fromAbsoluteTime) x === x
 --
-fromPOSIXTime :: POSIXTime -> TAI64
-fromPOSIXTime = fromDiffTime . realToFrac . (+ 2^(62 :: Int)) . (+ 10)
+fromAbsoluteTime :: AbsoluteTime -> TAI64
+fromAbsoluteTime = mk . diffAbsoluteTime tai64Epoch
+  where
+    mk d = let (TAI64 s n as) = fromDiffTime d
+            in TAI64 (piv - s) n as
+
+
+-- $libtai
+-- <http://cr.yp.to/libtai.html libtai> employs a means of dealing with leap
+-- seconds which is broken in several ways. As an artifact of this, the
+-- @taia_now@ function employed by both @daemontools@ and @runit@ produces
+-- \"taistamps\" which do not consider leap seconds, but are offset from
+-- 1970-01-01 00:00:00 UTC by 10s + 500ns (the purpose of the latter is
+-- unclear, as conversion functions seem to ignore it). Obviously, this violates
+-- it's own spec, yet (perhaps ironically) allows conversion back to UTC or
+-- local time without the need for a leap second table.
+--
+-- For compatibility and convenience, we provide some machinery to deal with
+-- TAI64 labels generated by these programs.
+--
+
+-- | Represents a 'TAI64' label obtained by ignoring leap seconds, and offset
+-- from 1970-01-01 00:00:00 UTC by 10.0000005s
+--
+newtype Libtai = Libtai TAI64
+    deriving (Eq, Show, Ord, Bounded, Arbitrary)
+
+
+-- unfortunately, there doesn't seem to be a way to derive unboxed vectors
+-- through GeneralizedNewtypeDeriving, so we need to repeat the boilerplate
+-- below.
+
+newtype instance MVector s Libtai = MV_Libtai (MVector s TAI64)
+newtype instance Vector    Libtai = V_Libtai  (Vector    TAI64)
+
+instance VM.MVector MVector Libtai where
+    {-# INLINE basicLength          #-}
+    {-# INLINE basicUnsafeSlice     #-}
+    {-# INLINE basicOverlaps        #-}
+    {-# INLINE basicUnsafeNew       #-}
+    {-# INLINE basicUnsafeReplicate #-}
+    {-# INLINE basicUnsafeRead      #-}
+    {-# INLINE basicUnsafeWrite     #-}
+    {-# INLINE basicClear           #-}
+    {-# INLINE basicSet             #-}
+    {-# INLINE basicUnsafeCopy      #-}
+    {-# INLINE basicUnsafeGrow      #-}
+    basicLength (MV_Libtai x)
+        = VM.basicLength x
+    basicUnsafeSlice i n (MV_Libtai v)
+        = MV_Libtai $ VM.basicUnsafeSlice i n v
+    basicOverlaps (MV_Libtai v1) (MV_Libtai v2)
+        = VM.basicOverlaps v1 v2
+    basicUnsafeNew n
+        = MV_Libtai `liftM` VM.basicUnsafeNew n
+#if MIN_VERSION_vector(0,11,0)
+    basicInitialize (MV_Libtai v)
+        = VM.basicInitialize v
+    {-# INLINE basicInitialize      #-}
+#endif
+    basicUnsafeReplicate n (Libtai tai)
+        = MV_Libtai `liftM` VM.basicUnsafeReplicate n tai
+    basicUnsafeRead (MV_Libtai v) i
+        = Libtai `liftM` VM.basicUnsafeRead v i
+    basicUnsafeWrite (MV_Libtai v) i (Libtai tai)
+        = VM.basicUnsafeWrite v i tai
+    basicClear (MV_Libtai v)
+        = VM.basicClear v
+    basicSet (MV_Libtai v) (Libtai tai)
+        = VM.basicSet v tai
+    basicUnsafeCopy (MV_Libtai v1) (MV_Libtai v2)
+        = VM.basicUnsafeCopy v1 v2
+    basicUnsafeMove (MV_Libtai v1) (MV_Libtai v2)
+        = VM.basicUnsafeMove v1 v2
+    basicUnsafeGrow (MV_Libtai v) n
+        = MV_Libtai `liftM` VM.basicUnsafeGrow v n
+
+instance VG.Vector Vector Libtai where
+    {-# INLINE basicUnsafeFreeze #-}
+    {-# INLINE basicUnsafeThaw   #-}
+    {-# INLINE basicLength       #-}
+    {-# INLINE basicUnsafeSlice  #-}
+    {-# INLINE basicUnsafeIndexM #-}
+    {-# INLINE elemseq           #-}
+    basicUnsafeFreeze (MV_Libtai v)
+        = V_Libtai `liftM` VG.basicUnsafeFreeze v
+    basicUnsafeThaw (V_Libtai v)
+        = MV_Libtai `liftM` VG.basicUnsafeThaw v
+    basicLength (V_Libtai v)
+        = VG.basicLength v
+    basicUnsafeSlice i n (V_Libtai v)
+        = V_Libtai $ VG.basicUnsafeSlice i n v
+    basicUnsafeIndexM (V_Libtai v) i
+        = Libtai `liftM` VG.basicUnsafeIndexM v i
+    basicUnsafeCopy (MV_Libtai mv) (V_Libtai v)
+        = VG.basicUnsafeCopy mv v
+    elemseq _ (Libtai tai) z
+        = VG.elemseq (undefined :: Vector a) tai z
+
+instance Unbox Libtai
+
+
+-- | Tag a 'TAI64' value as being created by a @libtai@-compatible program.
+--
+-- Note that this lowers precision to nanoseconds.
+--
+libtai :: TAI64 -> Libtai
+libtai tai = Libtai tai { taiAttos = 0 }
+
+-- | Obtain a proper 'TAI64' from 'Libtai'
+--
+-- Note that this is relatively expensive, as it needs to convert to 'UTCTime'
+-- first before applying the 'LeapSecondTable'.
+--
+unLibtai :: LeapSecondTable -> Libtai -> TAI64
+unLibtai lst = fromAbsoluteTime . utcToTAITime lst . libtaiToUTC
+
+-- | Obtain the current time as 'Libtai'.
+--
+-- This is (bug-)compatible with the function of the same name from @libtai@: we
+-- just obtain the current 'POSIXTime' and apply an offset of 10.0000005s.
+--
+taia_now :: IO Libtai
+taia_now = do
+    posix <- getPOSIXTime
+    let tai = fromDiffTime (realToFrac posix)
+    pure . Libtai $ tai
+        { taiSecs  = taiSecs  tai + piv + 10
+        , taiNanos = taiNanos tai + 500
+        , taiAttos = 0
+        }
+
+-- | Obtain the local time corresponding to 'Libtai'.
+--
+-- This is compatible with the program of the same name from the @daemontools@
+-- suite.
+--
+-- >>> let tai64n  = "4000000057693ef01cf4d1a4" -- generated by 'tai64n' from 'daemontools'
+-- >>> let Right t = libtai <$> fromText tai64n
+-- >>> let cest    = TimeZone (60 * 2) True "CEST"
+-- >>> utcToZonedTime cest (libtaiToUTC t)
+-- 2016-06-21 15:19:34.4858065 CEST
+--
+tai64nlocal :: Libtai -> IO ZonedTime
+tai64nlocal t = utcToZonedTime <$> getCurrentTimeZone <*> pure (libtaiToUTC t)
+
+-- | Obtain the 'UTCTime' used to generate 'Libtai'.
+libtaiToUTC :: Libtai -> UTCTime
+libtaiToUTC = posixSecondsToUTCTime . libtaiToPOSIX
+
+-- | Obtain the 'POSIXTime' used to generate 'Libtai'.
+libtaiToPOSIX :: Libtai -> POSIXTime
+libtaiToPOSIX (Libtai tai)
+    -- nb. the 500ns added by 'taia_now' are _not_ subtracted here again!
+    = realToFrac . toDiffTime $ tai { taiSecs = taiSecs tai - piv - 10 }
+
+-- | Obtain a 'Label' for 'Libtai'. Note that this is always 'TAI64N'.
+--
+-- >>> let tai64n  = "4000000057693ef01cf4d1a4" -- generated by 'tai64n' from 'daemontools'
+-- >>> toText . libtaiLabel . libtai <$> fromText tai64n
+-- Right "4000000057693ef01cf4d1a4"
+--
+libtaiLabel :: Libtai -> Label
+libtaiLabel (Libtai tai) = TAI64N tai
+
+-- | Addition of 'Libtai' values.
+sumLibtai :: Libtai -> Libtai -> Libtai
+sumLibtai (Libtai a) (Libtai b) = Libtai $ sumTAI64 a b
+
+-- | Subtraction of 'Libtai' values.
+subLibtai :: Libtai -> Libtai -> Libtai
+subLibtai (Libtai a) (Libtai b) = Libtai $ subTAI64 a b
+
+-- | Add 'DiffTime' to 'Libtai'.
+addLibtai :: DiffTime -> Libtai -> Libtai
+addLibtai d (Libtai t) = Libtai $ addTAI64 d t
+
+-- | Subtraction of 'Libtai' values, yielding 'DiffTime'.
+diffLibtai :: Libtai -> Libtai -> DiffTime
+diffLibtai (Libtai a) (Libtai b) = diffTAI64 a b
+
+
+--------------------------------------------------------------------------------
+-- External Representation                                                    --
+--------------------------------------------------------------------------------
+
+-- | A TAI64 label with precision as denoted by the data constructor. This is
+-- used to render the \"external\" (cf. 'toText', 'toByteString') respectively
+-- binary representation.
+--
+data Label
+    = TAI64S  {-# UNPACK #-} !TAI64
+    | TAI64N  {-# UNPACK #-} !TAI64
+    | TAI64NA {-# UNPACK #-} !TAI64
+    deriving Show
+
+-- | Get the 'TAI64' stamp from the 'Label', truncated to the precision as
+-- denoted by the 'Label''s data constructor.
+--
+fromLabel :: Label -> TAI64
+fromLabel (TAI64S  t) = t { taiNanos = 0, taiAttos = 0 }
+fromLabel (TAI64N  t) = t { taiAttos = 0 }
+fromLabel (TAI64NA t) = t
+
+instance Eq Label where
+    a == b = case a of
+        TAI64S  (TAI64 s _ _ ) -> s == s'
+        TAI64N  (TAI64 s n _ ) -> s == s' && n == n'
+        TAI64NA (TAI64 s n as) -> s == s' && n == n' && as == as'
+      where
+        (TAI64 s' n' as') = fromLabel b
+
+instance Ord Label where
+    a <= b = case a of
+        TAI64S  (TAI64 s _ _ ) -> s <= s' && 0 <= n' &&  0 <= as'
+        TAI64N  (TAI64 s n _ ) -> s <= s' && n <= n' &&  0 <= as'
+        TAI64NA (TAI64 s n as) -> s <= s' && n <= n' && as <= as'
+      where
+        (TAI64 s' n' as') = fromLabel b
+
+instance Arbitrary Label where
+    arbitrary = oneof
+        [ TAI64S  <$> arbitrary
+        , TAI64N  <$> arbitrary
+        , TAI64NA <$> arbitrary
+        ]
+
+-- | External representation of a 'Label'
+--
+-- * 'TAI64S': eight 8-bit bytes, big-endian, encoding the second
+-- * 'TAI64N': twelve 8-bit bytes, big-endian, encoding the second, followed by
+-- the nanosecond
+-- * 'TAI64NA': sixteen 8-bit bytes, big-endian, encoding the second, followed
+-- by the nanosecond, followed by the attosecond
+--
+--
+-- Properties:
+--
+-- prop> (Binary.decode . Binary.encode) x == x
+--
+instance Binary Label where
+    put (TAI64S  tai) = putWord64be (taiSecs tai)
+    put (TAI64N  tai) = putWord64be (taiSecs tai) *> putWord32be (taiNanos tai)
+    put (TAI64NA tai) = putWord64be (taiSecs tai) *> putWord32be (taiNanos tai)
+                                                  *> putWord32be (taiAttos tai)
+
+    get = do
+        elts <- (,,) <$> getWord64be
+                     <*> optional getWord32be
+                     <*> optional getWord32be
+        pure $ case elts of
+            (s, Just  n, Just  a) -> TAI64NA (TAI64 s n a)
+            (s, Just  n, Nothing) -> TAI64N  (TAI64 s n 0)
+            (s, Nothing, Nothing) -> TAI64S  (TAI64 s 0 0)
+            (s, Nothing, Just  n) -> TAI64N  (TAI64 s n 0)
+
 
 -- | Render a textual (ie. hexadecimal) representation of the /external/
 -- TAI64{N,NA} format of the given 'Label'
@@ -523,3 +718,12 @@ toDiffTime (TAI64 s n as) = secs + nanos + attos
     nanos = fromRational (toRational n  * 10^^( -9 :: Int))
     attos = fromRational (toRational as * 10^^(-18 :: Int))
 {-# INLINABLE toDiffTime #-}
+
+
+-- | 1970-01-01 00:00:00 TAI
+tai64Epoch :: AbsoluteTime
+tai64Epoch = addAbsoluteTime (secondsToDiffTime 3506716800) taiEpoch
+
+piv,upp :: Word64
+piv = 2^(62 :: Int)
+upp = 2^(63 :: Int)

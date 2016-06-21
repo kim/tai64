@@ -246,7 +246,7 @@ instance Unbox TAI64
 --
 -- Properties:
 --
--- prop> \d (PicosecondResolution t) -> addTAI64 d t === fromUTCTime (addUTCTime (realToFrac d) (toUTCTime t))
+-- prop> \d (PicosecondResolution t) -> addTAI64 d t === fromAbsoluteTime (addAbsoluteTime d (toAbsoluteTime t))
 --
 addTAI64 :: DiffTime -> TAI64 -> TAI64
 addTAI64 d = sumTAI64 (fromDiffTime d)
@@ -256,10 +256,11 @@ addTAI64 d = sumTAI64 (fromDiffTime d)
 --
 -- Properties:
 --
--- prop> \(PicosecondResolution a) (PicosecondResolution b) -> b <= a ==> diffTAI64 a b === realToFrac (diffUTCTime (toUTCTime a) (toUTCTime b))
+-- prop> \(PicosecondResolution a) (PicosecondResolution b) -> b <= a && toAbsoluteTime b >= taiEpoch ==> diffTAI64 a b === diffAbsoluteTime (toAbsoluteTime a) (toAbsoluteTime b)
 --
 diffTAI64 :: TAI64 -> TAI64 -> DiffTime
 diffTAI64 a = toDiffTime . subTAI64 a
+-- FIXME: why are 'AbsoluteTime's before 'taiEpoch' subject to rounding errors?
 
 -- | sumTAI64 a b = a + b
 --
